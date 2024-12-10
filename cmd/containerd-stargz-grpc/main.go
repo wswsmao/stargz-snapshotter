@@ -213,7 +213,9 @@ func main() {
 		log.G(ctx).WithError(err).Fatalf("failed to serve snapshotter")
 	}
 
-	if cleanup {
+	// In detach mode, rs is taken over by fusemanager
+	// fusemanager will clean mount dir before exit
+	if cleanup && !*detachFuseManager {
 		log.G(ctx).Debug("Closing the snapshotter")
 		rs.Close()
 	}
