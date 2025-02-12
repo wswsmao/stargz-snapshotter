@@ -445,6 +445,11 @@ type writer struct {
 	abortFunc  func() error
 }
 
+// Copy copies data from src to the underlying writer
+func (w *writer) Copy(src io.Reader, buf []byte) (int64, error) {
+	return io.CopyBuffer(w.WriteCloser, src, buf)
+}
+
 func (w *writer) Commit() error {
 	return w.commitFunc()
 }

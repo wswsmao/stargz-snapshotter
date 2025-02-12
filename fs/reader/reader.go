@@ -555,6 +555,14 @@ func (sf *file) prefetchEntireFile(entireCacheID string) error {
 	}
 	defer w.Close()
 
+	copier, ok := w.(interface {
+		Copy(io.Reader, []byte) (int64, error)
+	})
+	if !ok {
+		w.Abort()
+		return fmt.Errorf("writer does not support Copy method")
+	}
+
 	for {
 		chunkOffset, chunkSize, chunkDigestStr, ok := sf.fr.ChunkEntryForOffset(offset)
 		if !ok {
@@ -565,32 +573,27 @@ func (sf *file) prefetchEntireFile(entireCacheID string) error {
 		}
 
 		id := genID(sf.id, chunkOffset, chunkSize)
-		b := sf.gr.bufPool.Get().(*bytes.Buffer)
-		b.Reset()
-		b.Grow(int(chunkSize))
-		ip := b.Bytes()[:chunkSize]
 
 		// Check if the content exists in the cache
 		// Just read it and merge to a new files, so cache.PassThrough() should not be used here
 		if r, err := sf.gr.cache.Get(id); err == nil {
-			n, err := r.ReadAt(ip, 0)
-			if (err == nil || err == io.EOF) && int64(n) == chunkSize {
-				if _, err := w.Write(ip[:n]); err != nil {
-					r.Close()
-					sf.gr.putBuffer(b)
-					w.Abort()
-					return fmt.Errorf("failed to write cached data: %w", err)
-				}
-				totalSize += int64(n)
-				offset = chunkOffset + int64(n)
-				r.Close()
-				sf.gr.putBuffer(b)
-				continue
-			}
+			buf := make([]byte, 4*1024*1024)
+			n, err := copier.Copy(io.NewSectionReader(r, 0, chunkSize), buf)
 			r.Close()
+			if err != nil {
+				w.Abort()
+				return fmt.Errorf("failed to copy cached data: %w", err)
+			}
+			totalSize += n
+			offset = chunkOffset + n
+			continue
 		}
 
 		// cache miss, prefetch the whole chunk
+		b := sf.gr.bufPool.Get().(*bytes.Buffer)
+		b.Reset()
+		b.Grow(int(chunkSize))
+		ip := b.Bytes()[:chunkSize]
 		if _, err := sf.fr.ReadAt(ip, chunkOffset); err != nil && err != io.EOF {
 			sf.gr.putBuffer(b)
 			w.Abort()
