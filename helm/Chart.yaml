@@ -1,0 +1,7 @@
+apiVersion: v2
+name: stargz-snapshotter
+description: A Helm chart for deploying stargz-snapshotter
+
+type: application
+version: "0.16.3"
+appVersion: "0.16.3"

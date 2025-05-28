@@ -1,0 +1,9 @@
+image:
+  reference: ""
+  tag: "latest"
+imagePullPolicy: Always
+imagePullSecrets: []
+nodeSelector: {}
+hostNetwork: true
+hostPid: true
+args: []

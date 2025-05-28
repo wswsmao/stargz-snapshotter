@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ .Chart.Name }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    matchLabels:
+      name: {{ .Chart.Name }}
+  template:
+    metadata:
+      labels:
+        name: {{ .Chart.Name }}
+    spec:
+      serviceAccountName: {{ .Chart.Name }}-sa
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+  {{- toYaml . | nindent 6 }}
+      {{- end }}
+      hostPID: {{ .Values.hostPid }}
+      hostNetwork: {{ .Values.hostNetwork }}
+      containers:
+      - name: stargz-snapshotter
+        image: {{ .Values.image.reference }}:{{ .Values.image.tag }}
+        imagePullPolicy: {{ .Values.imagePullPolicy }}
+        securityContext:
+          privileged: true
+        {{- if .Values.args }}
+        args:
+{{ toYaml .Values.args | indent 12 }}
+        {{- end }}
+        volumeMounts:
+        - name: stargz-config
+          mountPath: "/etc/containerd-stargz-grpc/"
+        - name: stargz-work-dir
+          mountPath: "/var/lib/containerd-stargz-grpc"
+          mountPropagation: Bidirectional
+        - name: stargz-run
+          mountPath: "/run/containerd-stargz-grpc"
+          mountPropagation: Bidirectional
+        - name: fuse
+          mountPath: "/dev/fuse"
+        - name: containerd-config
+          mountPath: /etc/containerd/
+        - name: local-bin
+          mountPath: "/usr/local/bin"
+      volumes:
+      - name: stargz-config
+        hostPath:
+          path: /etc/containerd-stargz-grpc/
+          type: DirectoryOrCreate
+      - name: stargz-run
+        hostPath:
+          path: /run/containerd-stargz-grpc
+          type: DirectoryOrCreate
+      - name: stargz-work-dir
+        hostPath:
+          path: /var/lib/containerd-stargz-grpc
+          type: DirectoryOrCreate
+      - name: fuse
+        hostPath:
+          path: /dev/fuse
+      - name: containerd-config
+        hostPath:
+          path: /etc/containerd/
+      - name: local-bin
+        hostPath:
+          path: /usr/local/bin
+
