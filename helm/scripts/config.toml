@@ -1,0 +1,7 @@
+[fuse]
+passthrough = false
+merge_buffer_size = 419430400
+merge_worker_count = 10
+
+[directory_cache]
+enable_hardlink = true
