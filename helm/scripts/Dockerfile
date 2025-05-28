@@ -1,4 +1,3 @@
-ARG NERDCTL_VERSION=1.7.7
 ARG OS_IMAGE=mirrors.tencent.com/tencentos/tencentos4-minimal:4.4-v20250331
 
 FROM --platform=$BUILDPLATFORM golang:1.24-bullseye AS snapshotter-dev
