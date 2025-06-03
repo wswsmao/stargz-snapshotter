@@ -58,6 +58,10 @@ type PassthroughFdGetter interface {
 	GetPassthroughFd(mergeBufferSize int64, mergeWorkerCount int) (uintptr, error)
 }
 
+type FilePrefetcher interface {
+	PrefetchFile(workerCount int) error
+}
+
 // VerifiableReader produces a Reader with a given verifier.
 type VerifiableReader struct {
 	r *reader
@@ -551,6 +555,81 @@ func (sf *file) GetPassthroughFd(mergeBufferSize int64, mergeWorkerCount int) (u
 	fd := file.Fd()
 	r.Close()
 	return fd, nil
+}
+
+func (sf *file) PrefetchFile(workerCount int) error {
+	if sf.gr.isClosed() {
+		return fmt.Errorf("reader is already closed")
+	}
+
+	if workerCount <= 0 {
+		workerCount = 1
+	}
+
+	var offset int64
+	var chunks []chunkData
+
+	for {
+		chunkOffset, chunkSize, digestStr, _, ok := sf.fr.ChunkEntryForOffset(offset)
+		if !ok {
+			break
+		}
+		chunks = append(chunks, chunkData{
+			offset:    chunkOffset,
+			size:      chunkSize,
+			digestStr: digestStr,
+		})
+		offset = chunkOffset + chunkSize
+	}
+
+	// Unlike passthrough, this can be skipped here,
+	// and a pull can be attempted again during subsequent reads.
+	if len(chunks) == 0 {
+		return nil
+	}
+
+	eg, ctx := errgroup.WithContext(context.Background())
+	sem := semaphore.NewWeighted(int64(workerCount))
+
+	for i := range chunks {
+		chunk := chunks[i]
+		if err := sem.Acquire(ctx, 1); err != nil {
+			return err
+		}
+
+		eg.Go(func() error {
+			defer sem.Release(1)
+			return sf.prefetchChunk(chunk)
+		})
+	}
+
+	return eg.Wait()
+}
+
+func (sf *file) prefetchChunk(chunk chunkData) error {
+	id := genID(sf.id, chunk.offset, chunk.size)
+
+	if r, err := sf.gr.cache.Get(id); err == nil {
+		r.Close()
+		return nil
+	}
+
+	b := sf.gr.bufPool.Get().(*bytes.Buffer)
+	defer sf.gr.putBuffer(b)
+
+	b.Reset()
+	b.Grow(int(chunk.size))
+	ip := b.Bytes()[:chunk.size]
+
+	if _, err := sf.fr.ReadAt(ip, chunk.offset); err != nil && err != io.EOF {
+		return fmt.Errorf("failed to read chunk at offset %d: %w", chunk.offset, err)
+	}
+
+	if err := sf.gr.verifyAndCache(sf.id, ip, chunk.digestStr, id); err != nil {
+		return fmt.Errorf("failed to verify and cache chunk at offset %d: %w", chunk.offset, err)
+	}
+
+	return nil
 }
 
 type batchWorkerArgs struct {
