@@ -363,6 +363,12 @@ func (n *node) Open(ctx context.Context, flags uint32) (fh fusefs.FileHandle, fu
 				f.InitFd(int(fd))
 			}
 		}
+	} else if n.fs.passThrough.mergeBufferSize < 0 {
+		if prefetcher, ok := ra.(reader.FileReadaheader); ok {
+			if err := prefetcher.ReadaheadFile(n.fs.passThrough.mergeWorkerCount); err != nil {
+				n.fs.s.report(fmt.Errorf("file prefetch failed in node.Open: %v", err))
+			}
+		}
 	}
 
 	return f, fuse.FOPEN_KEEP_CACHE, 0
