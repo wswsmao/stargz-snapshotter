@@ -48,6 +48,10 @@ To optimize the time taken for the initial image pull, you can use the `merge_bu
 
 By concurrently reading chunks and caching them for batch writing, you can significantly enhance the performance of the initial image pull in passthrough mode.
 
+Additionally, you can control when passthrough is enabled per file using `passthrough_file_threshold` (in bytes). Only files
+whose size is larger than this threshold will use passthrough. The default is `0` (disabled, all files are eligible for
+passthrough).
+
 # Important Considerations
 
 When passthrough mode is enabled, the following configuration is applied by default, even if it is set to false in the configuration file:

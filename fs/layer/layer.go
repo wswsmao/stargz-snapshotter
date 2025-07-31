@@ -69,6 +69,9 @@ type passThroughConfig struct {
 
 	// mergeWorkerCount is the number of workers to merge chunks
 	mergeWorkerCount int
+
+	// passthroughFileThreshold is the file size threshold for enabling passthrough mode
+	passthroughFileThreshold int64
 }
 
 // Layer represents a layer.
@@ -333,9 +336,10 @@ func (r *Resolver) Resolve(ctx context.Context, hosts source.RegistryHosts, refs
 
 	// Combine layer information together and cache it.
 	l := newLayer(r, desc, blobR, vr, passThroughConfig{
-		enable:           r.config.PassThrough,
-		mergeBufferSize:  r.config.MergeBufferSize,
-		mergeWorkerCount: r.config.MergeWorkerCount,
+		enable:                   r.config.PassThrough,
+		mergeBufferSize:          r.config.MergeBufferSize,
+		mergeWorkerCount:         r.config.MergeWorkerCount,
+		passthroughFileThreshold: r.config.PassthroughFileThreshold,
 	})
 	r.layerCacheMu.Lock()
 	cachedL, done2, added := r.layerCache.Add(name, l)
