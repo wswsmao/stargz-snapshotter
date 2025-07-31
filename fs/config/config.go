@@ -160,4 +160,8 @@ type FuseConfig struct {
 
 	// MergeWorkerCount is the number of workers to merge chunks for passthrough mode. Default is 10.
 	MergeWorkerCount int `toml:"merge_worker_count" default:"10" json:"merge_worker_count"`
+
+	// PassthroughFileThreshold is the file size threshold (in bytes) for enabling passthrough mode.
+	// Only files larger than this threshold will use passthrough mode. Default is 0.
+	PassthroughFileThreshold int64 `toml:"passthrough_file_threshold" default:"0" json:"passthrough_file_threshold"`
 }

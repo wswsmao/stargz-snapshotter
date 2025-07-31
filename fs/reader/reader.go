@@ -55,7 +55,7 @@ type Reader interface {
 }
 
 type PassthroughFdGetter interface {
-	GetPassthroughFd(mergeBufferSize int64, mergeWorkerCount int) (uintptr, error)
+	GetPassthroughFd(mergeBufferSize int64, mergeWorkerCount int, passthroughFileThreshold int64) (uintptr, error)
 }
 
 // VerifiableReader produces a Reader with a given verifier.
@@ -503,7 +503,7 @@ type chunkData struct {
 	bufferPos int64
 }
 
-func (sf *file) GetPassthroughFd(mergeBufferSize int64, mergeWorkerCount int) (uintptr, error) {
+func (sf *file) GetPassthroughFd(mergeBufferSize int64, mergeWorkerCount int, passthroughFileThreshold int64) (uintptr, error) {
 	var (
 		offset           int64
 		firstChunkOffset int64
@@ -528,6 +528,10 @@ func (sf *file) GetPassthroughFd(mergeBufferSize int64, mergeWorkerCount int) (u
 		})
 		totalSize += chunkSize
 		offset = chunkOffset + chunkSize
+	}
+
+	if totalSize < passthroughFileThreshold {
+		return ^uintptr(0), nil
 	}
 
 	id := genID(sf.id, firstChunkOffset, totalSize)
