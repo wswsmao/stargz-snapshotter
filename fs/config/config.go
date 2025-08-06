@@ -142,6 +142,9 @@ type DirectoryCacheConfig struct {
 
 	// FadvDontNeed forcefully clean fscache pagecache for saving memory. Default is false.
 	FadvDontNeed bool `toml:"fadv_dontneed" json:"fadv_dontneed"`
+
+	// FadvCleanupInterval is the interval (in seconds) for batch cleanup of page cache. Default is 10.
+	FadvCleanupInterval int `toml:"fadv_cleanup_interval" default:"10" json:"fadv_cleanup_interval"`
 }
 
 // FuseConfig is configuration for FUSE fs.

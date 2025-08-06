@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/containerd/stargz-snapshotter/util/cacheutil"
 	"github.com/containerd/stargz-snapshotter/util/namedmutex"
@@ -65,6 +66,9 @@ type DirectoryCacheConfig struct {
 
 	// FadvDontNeed forcefully clean fscache pagecache for saving memory.
 	FadvDontNeed bool
+
+	// FadvCleanupInterval is the interval (in seconds) for batch cleanup of page cache. Default is 10.
+	FadvCleanupInterval int
 }
 
 // TODO: contents validation.
@@ -180,6 +184,11 @@ func NewDirectoryCache(directory string, config DirectoryCacheConfig) (BlobCache
 		fadvDontNeed: config.FadvDontNeed,
 	}
 	dc.syncAdd = config.SyncAdd
+
+	if config.FadvDontNeed {
+		dc.initPageCacheCleanup(config.FadvCleanupInterval)
+	}
+
 	return dc, nil
 }
 
@@ -196,6 +205,11 @@ type directoryCache struct {
 	syncAdd      bool
 	direct       bool
 	fadvDontNeed bool
+
+	pendingPageCacheFiles map[string]bool
+	pageCacheMu           sync.Mutex
+	pageCacheTicker       *time.Ticker
+	pageCacheDone         chan struct{}
 
 	closed   bool
 	closedMu sync.Mutex
@@ -251,9 +265,7 @@ func (dc *directoryCache) Get(key string, opts ...Option) (Reader, error) {
 			ReaderAt: file,
 			closeFunc: func() error {
 				if dc.fadvDontNeed {
-					if err := dropFilePageCache(file); err != nil {
-						fmt.Printf("Warning: failed to drop page cache: %v\n", err)
-					}
+					go dc.addToPageCacheList(dc.cachePath(key))
 				}
 
 				// In passthough model, close will be toke over by go-fuse
@@ -314,13 +326,15 @@ func (dc *directoryCache) Add(key string, opts ...Option) (Writer, error) {
 				return errors.Join(errs...)
 			}
 
-			if dc.fadvDontNeed {
-				if err := dropFilePageCache(wip); err != nil {
-					fmt.Printf("Warning: failed to drop page cache: %v\n", err)
-				}
+			if err := os.Rename(wip.Name(), c); err != nil {
+				return err
 			}
 
-			return os.Rename(wip.Name(), c)
+			if dc.fadvDontNeed {
+				go dc.addToPageCacheList(c)
+			}
+
+			return nil
 		},
 		abortFunc: func() error {
 			return os.Remove(wip.Name())
@@ -389,6 +403,11 @@ func (dc *directoryCache) Close() error {
 		return nil
 	}
 	dc.closed = true
+
+	if dc.pageCacheDone != nil {
+		close(dc.pageCacheDone)
+	}
+
 	return os.RemoveAll(dc.directory)
 }
 
@@ -494,4 +513,64 @@ func dropFilePageCache(file *os.File) error {
 		return fmt.Errorf("posix_fadvise failed, ret=%d", err)
 	}
 	return nil
+}
+
+func (dc *directoryCache) pageCacheWorker() {
+	defer dc.pageCacheTicker.Stop()
+
+	for {
+		select {
+		case <-dc.pageCacheTicker.C:
+			dc.batchDropPageCache()
+		case <-dc.pageCacheDone:
+			return
+		}
+	}
+}
+
+func (dc *directoryCache) batchDropPageCache() {
+	dc.pageCacheMu.Lock()
+	if len(dc.pendingPageCacheFiles) == 0 {
+		dc.pageCacheMu.Unlock()
+		return
+	}
+
+	filesToCleanup := dc.pendingPageCacheFiles
+	dc.pendingPageCacheFiles = make(map[string]bool)
+	dc.pageCacheMu.Unlock()
+
+	for filePath := range filesToCleanup {
+		file, err := os.Open(filePath)
+		if err != nil {
+			fmt.Printf("Warning: failed to open file for cleanup %s: %v\n", filePath, err)
+			continue
+		}
+		if err := dropFilePageCache(file); err != nil {
+			fmt.Printf("Warning: failed to cleanup page cache for %s: %v\n", filePath, err)
+		}
+		file.Close()
+	}
+}
+
+func (dc *directoryCache) initPageCacheCleanup(cleanupInterval int) {
+	dc.pendingPageCacheFiles = make(map[string]bool)
+	dc.pageCacheDone = make(chan struct{})
+
+	if cleanupInterval <= 0 {
+		cleanupInterval = 10
+	}
+
+	dc.pageCacheTicker = time.NewTicker(time.Duration(cleanupInterval) * time.Second)
+
+	go dc.pageCacheWorker()
+}
+
+func (dc *directoryCache) addToPageCacheList(filePath string) {
+	if !dc.fadvDontNeed {
+		return
+	}
+
+	dc.pageCacheMu.Lock()
+	defer dc.pageCacheMu.Unlock()
+	dc.pendingPageCacheFiles[filePath] = true
 }
