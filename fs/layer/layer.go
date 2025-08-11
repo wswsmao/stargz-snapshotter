@@ -498,6 +498,9 @@ func (l *layer) Prefetch(prefetchSize int64) (err error) {
 }
 
 func (l *layer) prefetch(ctx context.Context, prefetchSize int64) error {
+	// Record start time for prefetch
+	prefetchStart := time.Now()
+
 	defer l.prefetchWaiter.done() // Notify the completion
 	// Measuring the total time to complete prefetch (use defer func() because l.Info().PrefetchSize is set later)
 	start := time.Now()
@@ -527,6 +530,7 @@ func (l *layer) prefetch(ctx context.Context, prefetchSize int64) error {
 	// Fetch the target range
 	downloadStart := time.Now()
 	err := l.blob.Cache(0, prefetchSize)
+	downloadDuration := time.Since(downloadStart)
 	commonmetrics.WriteLatencyLogValue(ctx, l.desc.Digest, commonmetrics.PrefetchDownload, downloadStart) // time to download prefetch data
 
 	if err != nil {
@@ -543,10 +547,17 @@ func (l *layer) prefetch(ctx context.Context, prefetchSize int64) error {
 	err = l.verifiableReader.Cache(reader.WithFilter(func(offset int64) bool {
 		return offset < prefetchSize // Cache only prefetch target
 	}))
+	decompressDuration := time.Since(decompressStart)
 	commonmetrics.WriteLatencyLogValue(ctx, l.desc.Digest, commonmetrics.PrefetchDecompress, decompressStart) // time to decompress prefetch data
+
 	if err != nil {
 		return fmt.Errorf("failed to cache prefetched layer: %w", err)
 	}
+
+	// Print summary at the end
+	totalDuration := time.Since(prefetchStart)
+	fmt.Printf("[STARGZ_TIMING] [Prefetch] Summary: prefetchStart: %v, downloadDuration: %v, decompressDuration: %v, totalDuration: %v, prefetchSize: %d\n",
+		prefetchStart.Format("15:04:05.000"), downloadDuration, decompressDuration, totalDuration, prefetchSize)
 
 	return nil
 }

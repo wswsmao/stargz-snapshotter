@@ -71,6 +71,11 @@ type VerifiableReader struct {
 	closedMu sync.Mutex
 
 	verifier func(uint32, string) (digest.Verifier, error)
+
+	// Cumulative timing for Cache method
+	cumulativePeekTime time.Duration
+	cumulativeCopyTime time.Duration
+	timingMu           sync.Mutex
 }
 
 func (vr *VerifiableReader) storeLastVerifyErr(err error) {
@@ -118,6 +123,9 @@ func (vr *VerifiableReader) Cache(opts ...CacheOption) (err error) {
 		return fmt.Errorf("reader is already closed")
 	}
 
+	// Reset cumulative timing at the start
+	vr.resetCumulativeTiming()
+
 	var cacheOpts cacheOptions
 	for _, o := range opts {
 		o(&cacheOpts)
@@ -146,7 +154,14 @@ func (vr *VerifiableReader) Cache(opts ...CacheOption) (err error) {
 			0, eg, semaphore.NewWeighted(int64(runtime.GOMAXPROCS(0))),
 			rootID, r, filter, cacheOpts.cacheOpts...)
 	})
-	return eg.Wait()
+
+	err = eg.Wait()
+
+	// Print cumulative timing statistics
+	peekTime, copyTime := vr.getCumulativeTiming()
+	fmt.Printf("[STARGZ_TIMING] [Cache] Cumulative Peek Time: %v, Copy Time: %v\n", peekTime, copyTime)
+
+	return err
 }
 
 func (vr *VerifiableReader) cacheWithReader(ctx context.Context, currentDepth int, eg *errgroup.Group, sem *semaphore.Weighted, dirID uint32, r metadata.Reader, filter func(int64) bool, opts ...cache.Option) (rErr error) {
@@ -193,7 +208,11 @@ func (vr *VerifiableReader) cacheWithReader(ctx context.Context, currentDepth in
 		}
 
 		fr, err := r.OpenFileWithPreReader(id, func(nid uint32, chunkOffset, chunkSize int64, chunkDigest string, r io.Reader) (retErr error) {
-			return vr.readAndCache(nid, r, chunkOffset, chunkSize, chunkDigest, opts...)
+			peekTime, copyTime, _, err := vr.readAndCacheWithTiming(nid, r, chunkOffset, chunkSize, chunkDigest, opts...)
+			if err == nil {
+				vr.addCumulativeTiming(peekTime, copyTime)
+			}
+			return err
 		})
 		if err != nil {
 			rErr = err
@@ -215,10 +234,11 @@ func (vr *VerifiableReader) cacheWithReader(ctx context.Context, currentDepth in
 
 			eg.Go(func() error {
 				defer sem.Release(1)
-				err := vr.readAndCache(id, io.NewSectionReader(fr, chunkOffset, chunkSize), chunkOffset, chunkSize, chunkDigestStr, opts...)
+				peekTime, copyTime, _, err := vr.readAndCacheWithTiming(id, io.NewSectionReader(fr, chunkOffset, chunkSize), chunkOffset, chunkSize, chunkDigestStr, opts...)
 				if err != nil {
 					return fmt.Errorf("failed to read %q (off:%d,size:%d): %w", name, chunkOffset, chunkSize, err)
 				}
+				vr.addCumulativeTiming(peekTime, copyTime)
 				return nil
 			})
 		}
@@ -286,6 +306,82 @@ func (vr *VerifiableReader) readAndCache(id uint32, fr io.Reader, chunkOffset, c
 	return w.Commit()
 }
 
+func (vr *VerifiableReader) readAndCacheWithTiming(id uint32, fr io.Reader, chunkOffset, chunkSize int64, chunkDigest string, opts ...cache.Option) (peekTime, copyTime, totalTime time.Duration, retErr error) {
+	startTime := time.Now()
+
+	gr := vr.r
+
+	if retErr != nil {
+		vr.storeLastVerifyErr(retErr)
+	}
+
+	// Check if it already exists in the cache
+	cacheID := genID(id, chunkOffset, chunkSize)
+	if r, err := gr.cache.Get(cacheID); err == nil {
+		r.Close()
+		totalTime = time.Since(startTime)
+		return 0, 0, totalTime, nil
+	}
+
+	// missed cache, needs to fetch and add it to the cache
+	br := bufio.NewReaderSize(fr, int(chunkSize))
+
+	// Measure Peek time
+	peekStart := time.Now()
+	if _, err := br.Peek(int(chunkSize)); err != nil {
+		totalTime = time.Since(startTime)
+		return 0, 0, totalTime, fmt.Errorf("cacheWithReader.peek: %v", err)
+	}
+	peekTime = time.Since(peekStart)
+
+	w, err := gr.cache.Add(cacheID, opts...)
+	if err != nil {
+		totalTime = time.Since(startTime)
+		return peekTime, 0, totalTime, err
+	}
+	defer w.Close()
+	v, err := vr.verifier(id, chunkDigest)
+	if err != nil {
+		vr.prohibitVerifyFailureMu.RLock()
+		if vr.prohibitVerifyFailure {
+			vr.prohibitVerifyFailureMu.RUnlock()
+			totalTime = time.Since(startTime)
+			return peekTime, 0, totalTime, fmt.Errorf("verifier not found: %w", err)
+		}
+		vr.storeLastVerifyErr(err)
+		vr.prohibitVerifyFailureMu.RUnlock()
+	}
+	tee := io.Discard
+	if v != nil {
+		tee = io.Writer(v) // verification is required
+	}
+
+	// Measure CopyN time
+	copyStart := time.Now()
+	if _, err := io.CopyN(w, io.TeeReader(br, tee), chunkSize); err != nil {
+		w.Abort()
+		totalTime = time.Since(startTime)
+		return peekTime, 0, totalTime, fmt.Errorf("failed to cache file payload: %w", err)
+	}
+	copyTime = time.Since(copyStart)
+
+	if v != nil && !v.Verified() {
+		err := fmt.Errorf("invalid chunk")
+		vr.prohibitVerifyFailureMu.RLock()
+		if vr.prohibitVerifyFailure {
+			vr.prohibitVerifyFailureMu.RUnlock()
+			w.Abort()
+			totalTime = time.Since(startTime)
+			return peekTime, copyTime, totalTime, err
+		}
+		vr.storeLastVerifyErr(err)
+		vr.prohibitVerifyFailureMu.RUnlock()
+	}
+
+	totalTime = time.Since(startTime)
+	return peekTime, copyTime, totalTime, w.Commit()
+}
+
 func (vr *VerifiableReader) Close() error {
 	vr.closedMu.Lock()
 	defer vr.closedMu.Unlock()
@@ -301,6 +397,26 @@ func (vr *VerifiableReader) isClosed() bool {
 	closed := vr.closed
 	vr.closedMu.Unlock()
 	return closed
+}
+
+func (vr *VerifiableReader) addCumulativeTiming(peekTime, copyTime time.Duration) {
+	vr.timingMu.Lock()
+	vr.cumulativePeekTime += peekTime
+	vr.cumulativeCopyTime += copyTime
+	vr.timingMu.Unlock()
+}
+
+func (vr *VerifiableReader) resetCumulativeTiming() {
+	vr.timingMu.Lock()
+	vr.cumulativePeekTime = 0
+	vr.cumulativeCopyTime = 0
+	vr.timingMu.Unlock()
+}
+
+func (vr *VerifiableReader) getCumulativeTiming() (peekTime, copyTime time.Duration) {
+	vr.timingMu.Lock()
+	defer vr.timingMu.Unlock()
+	return vr.cumulativePeekTime, vr.cumulativeCopyTime
 }
 
 // NewReader creates a Reader based on the given stargz blob and cache implementation.

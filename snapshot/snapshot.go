@@ -277,7 +277,14 @@ func (o *snapshotter) Prepare(ctx context.Context, key, parent string, opts ...s
 			return nil, err
 		}
 	}
-	return o.mounts(ctx, s, parent)
+
+	mounts, err := o.mounts(ctx, s, parent)
+	if err == nil {
+		log.G(ctx).WithField("key", key).WithField("parent", parent).Error("prepare completed successfully")
+	} else {
+		log.G(ctx).WithField("key", key).WithField("parent", parent).WithError(err).Error("prepare failed")
+	}
+	return mounts, err
 }
 
 func (o *snapshotter) View(ctx context.Context, key, parent string, opts ...snapshots.Opt) ([]mount.Mount, error) {
