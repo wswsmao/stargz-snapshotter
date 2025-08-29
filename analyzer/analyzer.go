@@ -223,8 +223,11 @@ func Analyze(ctx context.Context, client *containerd.Client, ref string, opts ..
 				log.G(ctx).WithError(err).Error("failed to get notified path from early fanotifier")
 				break
 			}
-			if err := rc.Record(path); err != nil {
-				log.G(ctx).WithError(err).Debugf("failed to record %q in early monitoring", path)
+
+			relativePath := strings.TrimPrefix(strings.TrimPrefix(path, target), "/")
+
+			if err := rc.Record(relativePath); err != nil {
+				log.G(ctx).WithError(err).Debugf("failed to record %q in early monitoring", relativePath)
 			} else {
 				earlyAccessCount++
 			}
