@@ -229,10 +229,14 @@ func Analyze(ctx context.Context, client *containerd.Client, ref string, opts ..
 			if err := rc.Record(relativePath); err != nil {
 				log.G(ctx).WithError(err).Debugf("failed to record %q in early monitoring", relativePath)
 			} else {
+				fmt.Printf("** %s early fanotifier recorded %q\n", time.Now().Format("15:04:05.000000"), relativePath)
 				earlyAccessCount++
 			}
 		}
 	}()
+
+	fmt.Printf("** %s after earlyFanotifier.Start, target: %s\n", time.Now().Format("15:04:05.000000"), target)
+	time.Sleep(10 * time.Second)
 
 	task, err := container.NewTask(ctx, ioCreator)
 	if err != nil {
