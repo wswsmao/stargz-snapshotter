@@ -36,11 +36,17 @@ type Fanotifier struct {
 	closeFunc func() error
 }
 
-func SpawnFanotifier(fanotifierBin string) (*Fanotifier, error) {
-	// Run fanotifier that monitor "/" in a new mount namespace
-	cmd := exec.Command(fanotifierBin, "fanotify", "/")
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags: syscall.CLONE_NEWNS,
+func SpawnFanotifier(fanotifierBin string, useNewMountNS bool) (*Fanotifier, error) {
+	return SpawnFanotifierWithTarget(fanotifierBin, "/", useNewMountNS)
+}
+
+func SpawnFanotifierWithTarget(fanotifierBin string, target string, useNewMountNS bool) (*Fanotifier, error) {
+	// Run fanotifier that monitor target path in a new mount namespace or shared mount namespace
+	cmd := exec.Command(fanotifierBin, "fanotify", target)
+	if useNewMountNS {
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			Cloneflags: syscall.CLONE_NEWNS,
+		}
 	}
 	notifyR, err := cmd.StdoutPipe()
 	if err != nil {

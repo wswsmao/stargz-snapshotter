@@ -96,8 +96,20 @@ func Analyze(ctx context.Context, client *containerd.Client, ref string, opts ..
 	}
 	defer cleanup()
 
+	// Spawn an early fanotifier process to monitor rootfs access during container.NewTask
+	// This process shares the mount namespace with the parent process
+	earlyFanotifier, err := fanotify.SpawnFanotifierWithTarget("/proc/self/exe", target, false)
+	if err != nil {
+		return "", fmt.Errorf("failed to spawn early fanotifier: %w", err)
+	}
+	defer func() {
+		if err := earlyFanotifier.Close(); err != nil {
+			log.G(ctx).WithError(err).Warnf("failed to close early fanotifier")
+		}
+	}()
+
 	// Spawn a fanotifier process in a new mount namespace and setup recorder.
-	fanotifier, err := fanotify.SpawnFanotifier("/proc/self/exe")
+	fanotifier, err := fanotify.SpawnFanotifier("/proc/self/exe", true)
 	if err != nil {
 		return "", fmt.Errorf("failed to spawn fanotifier: %w", err)
 	}
@@ -181,6 +193,44 @@ func Analyze(ctx context.Context, client *containerd.Client, ref string, opts ..
 	} else {
 		ioCreator = cio.NewCreator(cio.WithStreams(nil, waitLine.registerWriter(os.Stdout), os.Stderr))
 	}
+
+	// Start to monitor and setup recorder.
+	rc, err := recorder.NewImageRecorder(ctx, cs, img, platforms.Default())
+	if err != nil {
+		return "", err
+	}
+	defer rc.Close()
+
+	// Start early monitoring before container.NewTask to capture rootfs access
+	if err := earlyFanotifier.Start(); err != nil {
+		return "", fmt.Errorf("failed to start early fanotifier: %w", err)
+	}
+
+	// Start early monitoring goroutine
+	earlyMonitorDone := make(chan struct{})
+	var earlyAccessCount int
+	go func() {
+		defer close(earlyMonitorDone)
+		defer func() {
+			log.G(ctx).Debugf("early fanotifier recorded %d paths", earlyAccessCount)
+		}()
+		for {
+			path, err := earlyFanotifier.GetPath()
+			if err != nil {
+				if err == io.EOF {
+					break
+				}
+				log.G(ctx).WithError(err).Error("failed to get notified path from early fanotifier")
+				break
+			}
+			if err := rc.Record(path); err != nil {
+				log.G(ctx).WithError(err).Debugf("failed to record %q in early monitoring", path)
+			} else {
+				earlyAccessCount++
+			}
+		}
+	}()
+
 	task, err := container.NewTask(ctx, ioCreator)
 	if err != nil {
 		return "", err
@@ -189,12 +239,12 @@ func Analyze(ctx context.Context, client *containerd.Client, ref string, opts ..
 		task.CloseIO(ctx, containerd.WithStdinCloser)
 	})
 
-	// Start to monitor "/" and run the task.
-	rc, err := recorder.NewImageRecorder(ctx, cs, img, platforms.Default())
-	if err != nil {
-		return "", err
+	// Stop early monitoring before starting main fanotifier
+	if err := earlyFanotifier.Close(); err != nil {
+		log.G(ctx).WithError(err).Warnf("failed to close early fanotifier")
 	}
-	defer rc.Close()
+	<-earlyMonitorDone // Wait for early monitoring to finish
+
 	if err := fanotifier.Start(); err != nil {
 		return "", fmt.Errorf("failed to start fanotifier: %w", err)
 	}
